@@ -1,4 +1,4 @@
-use std::{os::unix::net::SocketAddr, thread::JoinHandle};
+use std::{io::{self, Read}, os::unix::net::SocketAddr, thread::JoinHandle};
 
 use anyhow::Error;
 use tokio::{io::{AsyncReadExt, BufReader}, net::TcpStream, sync::watch::error::RecvError};
@@ -20,23 +20,30 @@ use tracing::{info, warn, error};
 
 // }
 
-pub struct Conn {
-    conn: TcpStream,
+pub trait Readable {
+    async fn readable(&self) -> io::Result<()>;
+    async fn read(&mut self, buf : &mut [u8]) -> Result<usize,std::io::Error>;
 }
 
-impl Conn {
-    pub const BUFF_NB_BYTES: usize = 1024;
+pub trait Addr {
+    async fn addr(&self) -> io::Result<String>;    
+}
 
-    pub async fn handle(conn: TcpStream) -> Result<Self,anyhow::Error>{
-        let conn_addr = conn.peer_addr().unwrap();
-        let mut connection_obj = Conn {
-            conn:conn
-        };
-        match connection_obj.conn.readable().await {
+pub trait ConnHandler 
+    where 
+        Self : Readable + Addr + Sized
+{
+
+    async fn handle(&mut self) -> Result<(),anyhow::Error> {
+        const BUFF_NB_BYTES: usize = 1024;
+
+        let conn_addr = self.addr().await?;
+        
+        match self.readable().await {
             Ok(()) => {
                 loop {
-                    let mut buff = [0; Self::BUFF_NB_BYTES];
-                    match connection_obj.conn.read(&mut buff).await {
+                    let mut buff = [0; BUFF_NB_BYTES];
+                    match self.read(&mut buff).await {
                         Ok(0) => {
                             info!("EOF reached on {}",conn_addr);
                             break;
@@ -59,25 +66,55 @@ impl Conn {
                 warn!("unable to read from connection : {} error: {}", conn_addr,e);
             }
         }
+        Ok(())
+    }
+}
 
-        Ok(connection_obj)
+pub struct Conn {
+    conn: TcpStream,
+}
+
+impl Addr for Conn {
+    async fn addr(&self) -> io::Result<String> {
+        self.conn.peer_addr().map(|res| {res.to_string()})
+    }
+}
+
+impl Readable for Conn {
+    async fn read(&mut self, buf : &mut [u8]) -> Result<usize,std::io::Error> {
+        self.conn.read(buf).await     
+    }
+    async fn readable(&self) -> io::Result<()> {
+        self.conn.readable().await
+    }
+}
+
+impl ConnHandler for Conn{
+}
+
+impl Conn {
+
+    pub fn new(conn: TcpStream) -> Self {
+        Conn {
+            conn:conn
+        }
     }
 }
 
 /// struct that listens to incoming connections and offloads them to tokio tasks
-pub struct Server<T> where
-    T: Result
+pub struct Server<T : Readable + Addr>
 {
     addr: String,
     task_list: Vec<JoinHandle<T>>
 }
 
-impl Server{
-    pub fn new(
+impl <T:Readable + Addr> Server<T>{
+    pub fn new (
         addr: String,
     ) -> Self {
         Self {
             addr: addr,
+            task_list: Vec::<JoinHandle<T>>::new()
         }
     }
     
