@@ -1,7 +1,6 @@
-use std::{io::{self, Read}, os::unix::net::SocketAddr, thread::JoinHandle};
+use std::{io::{self, Read}};
 
-use anyhow::Error;
-use tokio::{io::{AsyncReadExt, BufReader}, net::TcpStream, sync::watch::error::RecvError};
+use tokio::{io::{AsyncReadExt, BufReader}, net::TcpStream, sync::watch::error::RecvError, task::JoinHandle};
 use tracing::{info, warn, error};
 
 // pub enum DisplayMessages {
@@ -93,28 +92,28 @@ impl ConnHandler for Conn{
 }
 
 impl Conn {
-
     pub fn new(conn: TcpStream) -> Self {
         Conn {
-            conn:conn
+            conn:conn,
         }
     }
 }
+
 
 /// struct that listens to incoming connections and offloads them to tokio tasks
 pub struct Server<T : Readable + Addr>
 {
     addr: String,
-    task_list: Vec<JoinHandle<T>>
+    handlers: Vec<JoinHandle<T>>
 }
 
-impl <T:Readable + Addr> Server<T>{
+impl <T:Readable + Addr + ConnHandler> Server<T>{
     pub fn new (
         addr: String,
     ) -> Self {
         Self {
             addr: addr,
-            task_list: Vec::<JoinHandle<T>>::new()
+            handlers: Vec::<JoinHandle<T>>::new()
         }
     }
     
@@ -133,10 +132,12 @@ impl <T:Readable + Addr> Server<T>{
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let conn = Conn::handle(stream);
+                    let conn = Conn::new(stream);
+                    let handler = conn.handle();
                     let handle = tokio::spawn(async move {
-                        conn.await
+                        handler.await
                     });
+                    self.handlers.push(handle);
                 },
                 Err(e) => {
 
